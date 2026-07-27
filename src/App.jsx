@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { projectImage } from "./assets/projectImage.js";
-import { supabase, TRANSACTIONS_TABLE, SETTINGS_TABLE, loginAppUser } from "./supabaseClient";
+import { supabase, TRANSACTIONS_TABLE, SETTINGS_TABLE, loginAppUser, changeOwnPassword, adminResetPassword } from "./supabaseClient";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer, Cell,
 } from "recharts";
@@ -271,6 +271,7 @@ function LoginScreen({ onLogin }) {
         username: username.trim(),
         displayName: result.display_name,
         partnerId: result.partner_id,
+        isAdmin: !!result.is_admin,
       });
     } catch (e) {
       console.error(e);
@@ -381,6 +382,99 @@ export default function App() {
       localStorage.removeItem(SESSION_STORAGE_KEY);
     } catch (e) {
       console.error("تعذر حذف جلسة الدخول", e);
+    }
+  };
+
+  // -------------------- تغيير كلمة المرور الخاصة --------------------
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [pwOld, setPwOld] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwSuccess, setPwSuccess] = useState("");
+
+  const submitPasswordChange = async () => {
+    setPwError("");
+    setPwSuccess("");
+    if (!pwOld || !pwNew || !pwConfirm) {
+      setPwError("عبّي كل الحقول.");
+      return;
+    }
+    if (pwNew.length < 4) {
+      setPwError("كلمة المرور الجديدة قصيرة جدًا (4 أحرف على الأقل).");
+      return;
+    }
+    if (pwNew !== pwConfirm) {
+      setPwError("كلمة المرور الجديدة والتأكيد غير متطابقين.");
+      return;
+    }
+    setPwBusy(true);
+    try {
+      const ok = await changeOwnPassword(session.username, pwOld, pwNew);
+      if (!ok) {
+        setPwError("كلمة المرور الحالية غير صحيحة.");
+      } else {
+        setPwSuccess("تم تغيير كلمة المرور بنجاح.");
+        setPwOld("");
+        setPwNew("");
+        setPwConfirm("");
+      }
+    } catch (e) {
+      console.error(e);
+      setPwError("تعذر الاتصال بقاعدة البيانات.");
+    } finally {
+      setPwBusy(false);
+    }
+  };
+
+  // -------------------- لوحة الإدارة (إعادة تعيين كلمات مرور الآخرين) --------------------
+  const [showAdminPanel, setShowAdminPanel] = useState(false);
+  const [adminOwnPassword, setAdminOwnPassword] = useState("");
+  const [resetTarget, setResetTarget] = useState(null); // username الذي يُعاد تعيين كلمته
+  const [resetNewPw, setResetNewPw] = useState("");
+  const [resetConfirmPw, setResetConfirmPw] = useState("");
+  const [resetError, setResetError] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetSuccess, setResetSuccess] = useState("");
+
+  const ADMIN_MANAGED_USERS = [
+    { username: "saeed", name: "سعيد الغامدي" },
+    { username: "ibrahim", name: "إبراهيم الخنيزان" },
+    { username: "abdullah", name: "عبدالله الغامدي" },
+  ];
+
+  const submitAdminReset = async () => {
+    setResetError("");
+    setResetSuccess("");
+    if (!adminOwnPassword || !resetNewPw || !resetConfirmPw) {
+      setResetError("عبّي كل الحقول.");
+      return;
+    }
+    if (resetNewPw.length < 4) {
+      setResetError("كلمة المرور الجديدة قصيرة جدًا (4 أحرف على الأقل).");
+      return;
+    }
+    if (resetNewPw !== resetConfirmPw) {
+      setResetError("كلمة المرور الجديدة والتأكيد غير متطابقين.");
+      return;
+    }
+    setResetBusy(true);
+    try {
+      const ok = await adminResetPassword(session.username, adminOwnPassword, resetTarget, resetNewPw);
+      if (!ok) {
+        setResetError("كلمة مرورك (كمسؤول) غير صحيحة.");
+      } else {
+        setResetSuccess(`تم تغيير كلمة مرور ${ADMIN_MANAGED_USERS.find((u) => u.username === resetTarget)?.name} بنجاح.`);
+        setResetNewPw("");
+        setResetConfirmPw("");
+        setResetTarget(null);
+      }
+    } catch (e) {
+      console.error(e);
+      setResetError("تعذر الاتصال بقاعدة البيانات.");
+    } finally {
+      setResetBusy(false);
     }
   };
 
@@ -846,8 +940,30 @@ export default function App() {
       {/* شريط لاصق يبقى ظاهرًا أثناء التمرير لإضافة دفعة */}
       <div className="sticky top-0 z-40 bg-page-blur border-b border-line px-6 py-3" style={{ backdropFilter: "blur(6px)" }}>
         <div className="max-w-6xl mx-auto flex justify-between items-center gap-2 flex-wrap">
-          <div className="flex items-center gap-2 text-xs text-muted">
+          <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
             <span>مسجّل الدخول باسم <span className="font-bold text-primary">{session.displayName}</span></span>
+            <button
+              onClick={() => {
+                setShowPasswordForm((s) => !s);
+                setPwError("");
+                setPwSuccess("");
+              }}
+              className="text-primary font-bold hover:opacity-70"
+            >
+              تغيير كلمة المرور
+            </button>
+            {session.isAdmin && (
+              <button
+                onClick={() => {
+                  setShowAdminPanel((s) => !s);
+                  setResetError("");
+                  setResetSuccess("");
+                }}
+                className="text-accent font-bold hover:opacity-70"
+              >
+                لوحة الإدارة
+              </button>
+            )}
             <button onClick={handleLogout} className="text-danger font-bold hover:opacity-70">تسجيل الخروج</button>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -862,6 +978,120 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {showPasswordForm && (
+          <div className="max-w-6xl mx-auto mt-3 bg-white border border-line rounded-lg p-4 space-y-3">
+            <h3 className="font-bold text-sm" style={{ fontFamily: "Almarai, sans-serif" }}>تغيير كلمة المرور</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="text-xs text-muted block mb-1">كلمة المرور الحالية</label>
+                <input
+                  type="password"
+                  value={pwOld}
+                  onChange={(e) => setPwOld(e.target.value)}
+                  className="w-full text-sm border border-line rounded-md px-2 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted block mb-1">كلمة المرور الجديدة</label>
+                <input
+                  type="password"
+                  value={pwNew}
+                  onChange={(e) => setPwNew(e.target.value)}
+                  className="w-full text-sm border border-line rounded-md px-2 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted block mb-1">تأكيد كلمة المرور الجديدة</label>
+                <input
+                  type="password"
+                  value={pwConfirm}
+                  onChange={(e) => setPwConfirm(e.target.value)}
+                  className="w-full text-sm border border-line rounded-md px-2 py-1.5"
+                />
+              </div>
+            </div>
+            {pwError && <div className="text-xs text-danger bg-danger-soft border border-danger-soft rounded-md px-2 py-1.5">{pwError}</div>}
+            {pwSuccess && <div className="text-xs text-success bg-success-soft border border-line rounded-md px-2 py-1.5">{pwSuccess}</div>}
+            <button
+              onClick={submitPasswordChange}
+              disabled={pwBusy}
+              className="bg-accent text-white text-sm font-bold px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50"
+            >
+              {pwBusy ? "جارٍ الحفظ..." : "حفظ كلمة المرور الجديدة"}
+            </button>
+          </div>
+        )}
+
+        {showAdminPanel && session.isAdmin && (
+          <div className="max-w-6xl mx-auto mt-3 bg-white border border-line rounded-lg p-4 space-y-3">
+            <h3 className="font-bold text-sm" style={{ fontFamily: "Almarai, sans-serif" }}>لوحة الإدارة — إعادة تعيين كلمات المرور</h3>
+            <div>
+              <label className="text-xs text-muted block mb-1">كلمة مرورك الحالية (للتحقق من صلاحيتك)</label>
+              <input
+                type="password"
+                value={adminOwnPassword}
+                onChange={(e) => setAdminOwnPassword(e.target.value)}
+                className="w-full sm:w-64 text-sm border border-line rounded-md px-2 py-1.5"
+                placeholder="كلمة مرورك"
+              />
+            </div>
+            <div className="space-y-2">
+              {ADMIN_MANAGED_USERS.map((u) => (
+                <div key={u.username} className="border border-line rounded-lg p-3">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <span className="text-sm font-semibold">{u.name} <span className="text-11 text-muted">({u.username})</span></span>
+                    <button
+                      onClick={() => {
+                        setResetTarget(resetTarget === u.username ? null : u.username);
+                        setResetError("");
+                        setResetSuccess("");
+                        setResetNewPw("");
+                        setResetConfirmPw("");
+                      }}
+                      className="text-xs font-bold text-primary hover:opacity-70"
+                    >
+                      {resetTarget === u.username ? "إلغاء" : "إعادة تعيين كلمة المرور"}
+                    </button>
+                  </div>
+                  {resetTarget === u.username && (
+                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-muted block mb-1">كلمة المرور الجديدة لـ {u.name}</label>
+                        <input
+                          type="password"
+                          value={resetNewPw}
+                          onChange={(e) => setResetNewPw(e.target.value)}
+                          className="w-full text-sm border border-line rounded-md px-2 py-1.5"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted block mb-1">تأكيد كلمة المرور الجديدة</label>
+                        <input
+                          type="password"
+                          value={resetConfirmPw}
+                          onChange={(e) => setResetConfirmPw(e.target.value)}
+                          className="w-full text-sm border border-line rounded-md px-2 py-1.5"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <button
+                          onClick={submitAdminReset}
+                          disabled={resetBusy}
+                          className="bg-accent text-white text-sm font-bold px-4 py-2 rounded-md hover:opacity-90 disabled:opacity-50"
+                        >
+                          {resetBusy ? "جارٍ الحفظ..." : `حفظ كلمة المرور الجديدة لـ ${u.name}`}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            {resetError && <div className="text-xs text-danger bg-danger-soft border border-danger-soft rounded-md px-2 py-1.5">{resetError}</div>}
+            {resetSuccess && <div className="text-xs text-success bg-success-soft border border-line rounded-md px-2 py-1.5">{resetSuccess}</div>}
+          </div>
+        )}
       </div>
 
       <main className="max-w-6xl mx-auto px-6 py-8 space-y-8">
