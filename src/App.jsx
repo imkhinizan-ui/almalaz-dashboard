@@ -7,7 +7,7 @@ import {
 import {
   Plus, Trash2, TrendingUp, TrendingDown, Wallet,
   HardHat, Landmark, Wind, ClipboardCheck, Layers, X, Loader2,
-  Pencil,
+  Pencil, FileText,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -115,7 +115,7 @@ const SEED_TRANSACTIONS = [
 /* -------------------- طبقة التخزين (سحابية عبر Supabase، مشتركة بين الجميع) -------------------- */
 const LOCKED_IDS = new Set(["seed_land_saeed", "seed_land_ibrahim"]);
 
-// يضمن اكتمال كل حقول الحركة (القفل / المرفق) بغض النظر عن مصدرها
+// يضمن اكتمال كل حقول الحركة (القفل / المرفق / المصادقة) بغض النظر عن مصدرها
 function normalizeTransaction(t) {
   return {
     ...t,
@@ -123,7 +123,19 @@ function normalizeTransaction(t) {
     reference: t.reference || "",
     note: t.note || "",
     attachment: t.attachment || null,
+    acknowledged: !!t.acknowledged,
+    acknowledgedBy: t.acknowledgedBy || null,
+    acknowledgedAt: t.acknowledgedAt || null,
   };
+}
+
+// هل هذه حركة "مدخلة من شريك" تخضع لآلية المصادقة الشكلية (وليست دفعة أرض ثابتة أو حركة مقاول)
+function isPartnerEntry(t) {
+  return (
+    !t.locked &&
+    (t.type === "expense" || t.type === "contribution") &&
+    (t.partner === "saeed" || t.partner === "ibrahim")
+  );
 }
 
 // تحويل صف قاعدة البيانات (snake_case) إلى كائن الحركة المستخدم في الواجهة (camelCase)
@@ -141,6 +153,9 @@ function rowToTransaction(row) {
     locked: row.locked,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    acknowledged: row.acknowledged,
+    acknowledgedBy: row.acknowledged_by,
+    acknowledgedAt: row.acknowledged_at,
   });
 }
 
@@ -159,6 +174,9 @@ function transactionToRow(t) {
     locked: !!t.locked,
     created_at: t.createdAt,
     updated_at: t.updatedAt,
+    acknowledged: !!t.acknowledged,
+    acknowledged_by: t.acknowledgedBy || null,
+    acknowledged_at: t.acknowledgedAt || null,
   };
 }
 
@@ -679,6 +697,11 @@ export default function App() {
             note: form.note.trim(),
             attachment: form.attachment,
             updatedAt: now,
+            // أي تعديل على حركة سبقت المصادقة عليها يعيد تصفيرها تلقائيًا،
+            // لأن الشريك الآخر صادق على التفاصيل القديمة وليس الجديدة
+            acknowledged: false,
+            acknowledgedBy: null,
+            acknowledgedAt: null,
           };
           setTransactions((prev) => prev.map((t) => (t.id === editingId ? updated : t)));
           await updateTransactionRow(updated);
@@ -725,6 +748,27 @@ export default function App() {
       console.error(e);
       setTransactions(prevList); // تراجع عن الحذف المحلي إذا فشل الحذف الفعلي
       showToast("تعذر حذف الحركة — حاول مجددًا");
+    }
+  };
+
+  // مصادقة الشريك الآخر على حركة (إجراء شكلي للشفافية والمتابعة فقط —
+  // لا يغيّر أي رقم أو حساب، ولا يمنع أو يؤخر توثيق الحركة أصلًا)
+  const acknowledgeTransaction = async (id) => {
+    const target = transactions.find((t) => t.id === id);
+    if (!target || !isPartnerEntry(target)) return;
+    if (!session || (session.partnerId !== "saeed" && session.partnerId !== "ibrahim")) return;
+    if (target.partner === session.partnerId) return; // ما يصادق أحد على حركته هو نفسه
+    if (target.acknowledged) return;
+    const now = new Date().toISOString();
+    const updated = { ...target, acknowledged: true, acknowledgedBy: session.partnerId, acknowledgedAt: now };
+    const prevList = transactions;
+    setTransactions((prev) => prev.map((t) => (t.id === id ? updated : t)));
+    try {
+      await updateTransactionRow(updated);
+    } catch (e) {
+      console.error(e);
+      setTransactions(prevList);
+      showToast("تعذر حفظ المصادقة — حاول مجددًا");
     }
   };
 
@@ -836,6 +880,138 @@ export default function App() {
 
   const partnerName = actorName;
   const categoryLabel = (id) => CATEGORIES.find((c) => c.id === id)?.label || id;
+
+  /* -------------------- تصدير تقرير PDF يعكس حالة المشروع وقت ولحظة إنشائه -------------------- */
+  const exportReport = () => {
+    const now = new Date();
+    const generatedAt = now.toLocaleString("en-GB", {
+      day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    const sortedTx = [...transactions].sort((a, b) => (a.date < b.date ? 1 : -1));
+
+    const ackLabel = (t) => {
+      if (!isPartnerEntry(t)) return "—";
+      if (t.acknowledged) return `✓ صادق ${actorName(t.acknowledgedBy)}`;
+      return "بانتظار المصادقة";
+    };
+
+    const rowsHtml = sortedTx
+      .map(
+        (t) => `
+        <tr>
+          <td>${t.date}</td>
+          <td>${transactionTypeLabel(t)}${t.locked ? " 🔒" : ""}</td>
+          <td>${actorName(t.partner)}</td>
+          <td>${t.category ? categoryLabel(t.category).split(" (")[0] : "—"}</td>
+          <td>${t.reference || "—"}</td>
+          <td>${t.note || "—"}</td>
+          <td>${ackLabel(t)}</td>
+          <td style="text-align:left; font-weight:600;">${fmt(t.amount)} ر.س</td>
+        </tr>`
+      )
+      .join("");
+
+    const categoryRowsHtml = categoryChartData
+      .map(
+        (c) => `
+        <tr>
+          <td>${c.name}</td>
+          <td style="text-align:left;">${fmt(c["المخطط"])} ر.س</td>
+          <td style="text-align:left;">${fmt(c["الفعلي"])} ر.س</td>
+          <td style="text-align:left; font-weight:600; color:${c["الفعلي"] > c["المخطط"] && c["المخطط"] > 0 ? "#9C4A30" : "#5C7048"}">${fmt(c["الفعلي"] - c["المخطط"])} ر.س</td>
+        </tr>`
+      )
+      .join("");
+
+    const partnerRowsHtml = partnerStats
+      .map(
+        (p) => `
+        <tr>
+          <td>${p.name}</td>
+          <td style="text-align:left;">${fmt(p.required)} ر.س</td>
+          <td style="text-align:left;">${fmt(p.landPaidBy)} ر.س</td>
+          <td style="text-align:left;">${fmt(p.buildExpensesPaidBy)} ر.س</td>
+          <td style="text-align:left;">${fmt(p.paid)} ر.س</td>
+          <td style="text-align:left; font-weight:600;">${fmt(p.totalContributed)} ر.س</td>
+          <td style="text-align:left; font-weight:700; color:${p.balance >= 0 ? "#5C7048" : "#9C4A30"}">${p.balance >= 0 ? "زيادة" : "متبقٍّ عليه"} ${fmt(Math.abs(p.balance))} ر.س</td>
+        </tr>`
+      )
+      .join("");
+
+    const html = `<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<title>تقرير مشروع الملز — ${generatedAt}</title>
+<style>
+  body { font-family: Tahoma, Arial, sans-serif; color: #241F19; margin: 32px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .meta { color: #7A6F5F; font-size: 12px; margin-bottom: 24px; }
+  h2 { font-size: 14px; margin-top: 28px; margin-bottom: 8px; border-bottom: 2px solid #211D18; padding-bottom: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th, td { border: 1px solid #E2D9C7; padding: 6px 8px; text-align: right; }
+  th { background: #F6F1E7; font-weight: 700; }
+  .summary { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+  .card { border: 1px solid #E2D9C7; border-radius: 8px; padding: 12px 16px; flex: 1; min-width: 160px; }
+  .card .label { font-size: 11px; color: #7A6F5F; }
+  .card .value { font-size: 18px; font-weight: 800; margin-top: 4px; }
+  .print-btn { position: fixed; top: 16px; left: 16px; background: #A9713D; color: #fff; border: none;
+    padding: 10px 16px; border-radius: 8px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  @media print { .print-btn { display: none; } }
+</style>
+</head>
+<body>
+  <button class="print-btn" onclick="window.print()">طباعة / حفظ كـ PDF</button>
+  <h1>تقرير متابعة الإنفاق — مشروع الوحدات العقارية، حي الملز</h1>
+  <div class="meta">تاريخ ووقت إنشاء التقرير: ${generatedAt} &nbsp;·&nbsp; المقاول المشرف المنفذ: ${CONTRACTOR}</div>
+
+  <h2>الملخص المالي وقت التقرير</h2>
+  <div class="summary">
+    <div class="card"><div class="label">الميزانية الفعلية والمخططة</div><div class="value">${fmt(effectiveBudget)} ر.س</div></div>
+    <div class="card"><div class="label">إجمالي المصروف الفعلي</div><div class="value">${fmt(totalExpenses)} ر.س</div></div>
+    <div class="card"><div class="label">المتبقي من الميزانية المخططة</div><div class="value">${fmt(remaining)} ر.س</div></div>
+  </div>
+  ${budgetAdjustment !== 0 ? `<div class="meta">شامل تعديل من حركات المقاول: الأساس ${fmt(BASE_BUDGET)} ${budgetAdjustment > 0 ? "+" : "-"} ${fmt(Math.abs(budgetAdjustment))} ر.س</div>` : ""}
+
+  <h2>حسابات الشركاء الممولين</h2>
+  <table>
+    <thead><tr>
+      <th>الشريك</th><th>الحصة المطلوبة</th><th>حصته من الأرض</th><th>مصاريف بناء/إشراف دفعها</th><th>دفعات تمويل</th><th>إجمالي المساهمة</th><th>الرصيد</th>
+    </tr></thead>
+    <tbody>${partnerRowsHtml}</tbody>
+  </table>
+
+  <h2>حساب المقاول (${CONTRACTOR})</h2>
+  <div class="summary">
+    <div class="card"><div class="label">إجمالي الدفعات العاجلة</div><div class="value">${fmt(contractorStats.totalAdvances)} ر.س</div></div>
+    <div class="card"><div class="label">إجمالي التسويات المستلمة</div><div class="value">${fmt(contractorStats.totalSettlements)} ر.س</div></div>
+    <div class="card"><div class="label">صافي المستحق له</div><div class="value" style="color:${contractorStats.netOwed > 0 ? "#9C4A30" : "#5C7048"}">${contractorStats.netOwed > 0 ? fmt(contractorStats.netOwed) + " ر.س" : "تمت التسوية"}</div></div>
+  </div>
+
+  <h2>المخطط مقابل الفعلي حسب البند</h2>
+  <table>
+    <thead><tr><th>البند</th><th>المخطط</th><th>الفعلي</th><th>الفرق</th></tr></thead>
+    <tbody>${categoryRowsHtml}</tbody>
+  </table>
+
+  <h2>سجل كامل بالدفعات والمصاريف (${sortedTx.length} حركة)</h2>
+  <table>
+    <thead><tr>
+      <th>التاريخ</th><th>النوع</th><th>الطرف</th><th>البند</th><th>المرجع</th><th>ملاحظة</th><th>المصادقة</th><th>المبلغ</th>
+    </tr></thead>
+    <tbody>${rowsHtml}</tbody>
+  </table>
+</body>
+</html>`;
+
+    const reportWindow = window.open("", "_blank");
+    if (reportWindow) {
+      reportWindow.document.write(html);
+      reportWindow.document.close();
+    } else {
+      showToast("يرجى السماح بالنوافذ المنبثقة لعرض التقرير");
+    }
+  };
 
   if (!sessionChecked) {
     return (
@@ -968,6 +1144,14 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             {toast && <span className="text-xs text-danger">{toast}</span>}
+            <button
+              onClick={exportReport}
+              className="flex items-center gap-1.5 bg-white border border-line text-primary text-xs font-bold px-3 py-2 rounded-lg hover:opacity-80 transition-opacity"
+              title="تقرير PDF بحالة المشروع وتاريخ ووقت إنشائه"
+            >
+              <FileText size={14} />
+              تقرير PDF
+            </button>
             <button
               onClick={openAddForm}
               className="flex items-center gap-2 bg-accent text-white text-sm font-bold px-4 py-2.5 rounded-lg shadow-sm hover:opacity-90 transition-opacity"
@@ -1469,6 +1653,7 @@ export default function App() {
                       <th className="text-right py-2 font-semibold">المرجع</th>
                       <th className="text-right py-2 font-semibold">ملاحظة</th>
                       <th className="text-right py-2 font-semibold">مرفق</th>
+                      <th className="text-right py-2 font-semibold">المصادقة</th>
                       <th className="text-right py-2 font-semibold">آخر تحديث</th>
                       <th className="text-left py-2 font-semibold">المبلغ</th>
                       <th></th>
@@ -1477,7 +1662,7 @@ export default function App() {
                   <tbody>
                     {filteredTransactions.length === 0 && (
                       <tr>
-                        <td colSpan={10} className="text-center py-8 text-muted">
+                        <td colSpan={11} className="text-center py-8 text-muted">
                           لا توجد حركات مسجّلة بعد — أضف أول دفعة أو مصروف.
                         </td>
                       </tr>
@@ -1521,6 +1706,24 @@ export default function App() {
                             </a>
                           ) : (
                             "—"
+                          )}
+                        </td>
+                        <td className="py-2">
+                          {!isPartnerEntry(t) ? (
+                            <span className="text-muted text-11">—</span>
+                          ) : t.acknowledged ? (
+                            <span className="text-11 text-success font-semibold" title={t.acknowledgedAt ? new Date(t.acknowledgedAt).toLocaleString("en-GB") : ""}>
+                              ✓ صادق {actorName(t.acknowledgedBy)}
+                            </span>
+                          ) : t.partner === session.partnerId ? (
+                            <span className="text-11 text-amber">بانتظار مصادقة {actorName(t.partner === "saeed" ? "ibrahim" : "saeed")}</span>
+                          ) : (
+                            <button
+                              onClick={() => acknowledgeTransaction(t.id)}
+                              className="text-11 font-bold text-primary bg-soft border border-line rounded-full px-2 py-0.5 hover:opacity-80"
+                            >
+                              مصادقة
+                            </button>
                           )}
                         </td>
                         <td className="py-2 text-muted text-11">
